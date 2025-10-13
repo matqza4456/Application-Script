@@ -46,8 +46,6 @@ local pendingTasks = {} -- Tracks delayed tasks that can be cancelled
 local effectsBeforeCleanup = {"Loaded", "Footsteps"}
 
 -- Retrieves or initializes the original state for a player's humanoid
--- @param player: The player whose state to retrieve
--- @return: Table containing WalkSpeed, JumpPower, and AutoRotate values
 local function getState(player)
 	if not originalStates[player] then
 		local char = player.Character
@@ -66,7 +64,6 @@ end
 
 -- Cleans up all player-related data when they leave
 -- Disconnects connections, cancels pending tasks, removes state data
--- @param player: The player to clean up
 local function cleanupPlayer(player)
 	originalStates[player] = nil
 
@@ -93,9 +90,6 @@ end
 Players.PlayerRemoving:Connect(cleanupPlayer)
 
 -- Creates a delayed task that can be cancelled if player leaves
--- @param player: The player associated with this task
--- @param duration: Time in seconds before callback executes
--- @param callback: Function to execute after duration
 local function createDelayedTask(player, duration, callback)
 	if not pendingTasks[player] then
 		pendingTasks[player] = {}
@@ -123,9 +117,6 @@ local function createDelayedTask(player, duration, callback)
 end
 
 -- Sets the player's walk speed, optionally reverting after a duration
--- @param player: Target player
--- @param speed: New walk speed value
--- @param duration: Optional time before reverting to original speed
 function module:SetWalkSpeed(player: Player, speed: number, duration: number?)
 	local char = player.Character
 	if not char then return end
@@ -147,9 +138,6 @@ function module:SetWalkSpeed(player: Player, speed: number, duration: number?)
 end
 
 -- Sets the player's jump power, optionally reverting after a duration
--- @param player: Target player
--- @param power: New jump power value
--- @param duration: Optional time before reverting to original power
 function module:SetJumpPower(player: Player, power: number, duration: number?)
 	local char = player.Character
 	if not char then return end
@@ -171,9 +159,6 @@ function module:SetJumpPower(player: Player, power: number, duration: number?)
 end
 
 -- Sets whether the humanoid auto-rotates to face movement direction
--- @param player: Target player
--- @param enabled: Whether auto-rotate should be enabled
--- @param duration: Optional time before reverting to original setting
 function module:SetAutoRotate(player: Player, enabled: boolean, duration: number?)
 	local char = player.Character
 	if not char then return end
@@ -195,8 +180,6 @@ function module:SetAutoRotate(player: Player, enabled: boolean, duration: number
 end
 
 -- Waits for the player's character appearance to load with timeout
--- @param player: Player to wait for
--- @param timeoutDuration: Maximum wait time in seconds (default: 10)
 function module:WaitForCharacterAppearance(player, timeoutDuration)
 	timeoutDuration = timeoutDuration or 10
 	local startTime = tick()
@@ -208,9 +191,6 @@ function module:WaitForCharacterAppearance(player, timeoutDuration)
 end
 
 -- Creates and plays a sound with automatic cleanup
--- @param player: Player (currently unused but available for future use)
--- @param params: Table containing SoundName, SoundLocation, SoundParent, Duration, PlaySound
--- @return: The created Sound instance or nil if failed
 function module:CreateSound(player, params)
 	local soundName = params.SoundName
 	local soundLocation = params.SoundLocation
@@ -253,8 +233,6 @@ end
 
 -- Spawns the player's character at the appropriate location
 -- Sets up spawn protection, visual effects, and race-specific setup
--- @param player: The player to spawn
--- @param character: The character model to spawn
 function module:SpawnCharacter(player, character)
 	local humanoid = character.Humanoid
 	local rootPart = character.HumanoidRootPart
@@ -412,7 +390,6 @@ end
 
 -- Checks and initializes player data, creates new character if needed
 -- Updates leaderboard and sends server info to client
--- @param player: Player whose data to check
 function module:CheckData(player)	
 	local data = ProfileStore:GetCurrentSlotData(player)
 
@@ -487,16 +464,12 @@ function module:CheckData(player)
 end
 
 -- Placeholder for checking and applying character attributes
--- @param player: The player
--- @param character: The character model
 function module:CheckAttributes(player : Player, character : Model)
 	-- Implementation to be added
 end
 
 -- Called when a player's character is added to the game
 -- Sets up the character model, fake head, and spawning logic
--- @param player: The player whose character was added
--- @param character: The character model that was added
 module.OnCharacterAdded = function(player, character)
 	local humanoid = character.Humanoid
 	local rootPart = character.HumanoidRootPart
@@ -596,8 +569,6 @@ end
 
 -- Called when a player's character is being removed
 -- Cleans up attributes, effects, and connections
--- @param player: The player whose character is being removed
--- @param character: The character model being removed
 module.OnCharacterRemoving = function(player, character)
 	-- Get debug info about active effects
 	local debugInfo = AttributeHandler:GetDebugInfo(character)
@@ -636,8 +607,6 @@ end
 
 -- Called when character appearance finishes loading
 -- Resets the character's appearance to default (removes accessories, clothing, etc.)
--- @param player: The player whose appearance loaded
--- @param character: The character model
 module.OnCharacterAppearanceLoaded = function(player, character)
 	local humanoid = character:WaitForChild("Humanoid")
 	local currentDescription = humanoid:GetAppliedDescription():Clone()
