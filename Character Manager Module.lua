@@ -8,7 +8,7 @@ local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local DebrisService = game:GetService("Debris")
 
--- Module references (kept as requires to preserve existing architecture)
+-- Module references
 local ServerModules = ServerStorage:WaitForChild("Modules")
 local ReplicatedModules = ReplicatedStorage:WaitForChild("Modules")
 
