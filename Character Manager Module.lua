@@ -1,81 +1,81 @@
---!strict
+--!strict -- enables Luau type checking and stricter runtime expectations
 -- CharacterManager.lua
 
 -- Services
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ServerStorage = game:GetService("ServerStorage")
-local RunService = game:GetService("RunService")
-local Players = game:GetService("Players")
-local DebrisService = game:GetService("Debris")
+local ReplicatedStorage = game:GetService("ReplicatedStorage") -- obtains the ReplicatedStorage service (networked assets container)
+local ServerStorage = game:GetService("ServerStorage") -- obtains the ServerStorage service (server-only assets container)
+local RunService = game:GetService("RunService") -- obtains RunService for heartbeat/timing callbacks
+local Players = game:GetService("Players") -- obtains Players service to manage player instances
+local DebrisService = game:GetService("Debris") -- obtains Debris service to schedule automatic Instance cleanup
 
 -- Module references
-local ServerModules = ServerStorage:WaitForChild("Modules")
-local ReplicatedModules = ReplicatedStorage:WaitForChild("Modules")
+local ServerModules = ServerStorage:WaitForChild("Modules") -- yields to server Modules folder (synchronous lookup)
+local ReplicatedModules = ReplicatedStorage:WaitForChild("Modules") -- yields to replicated Modules folder
 
-local ProfileStore = require(ServerModules.Services.ProfileStore)
-local RemoteProtecterService = require(ServerModules.Services.RemoteProtecterService)
-local RarityService = require(ServerModules.Services.RarityService)
+local ProfileStore = require(ServerModules.Services.ProfileStore) -- imports profile persistence abstraction (expected API: Get/Update/OnProfileReady/etc.)
+local RemoteProtecterService = require(ServerModules.Services.RemoteProtecterService) -- imports remote-protection utilities (anti-exploit)
+local RarityService = require(ServerModules.Services.RarityService) -- imports rarity/color generation utilities
 
-local CosmeticManager = require(ServerModules.Core.CosmeticManager)
-local LostSoulManager = require(ServerModules.Core.LostSoulManager)
-local HumanManager = require(ServerModules.Core.HumanManager)
-local ShinigamiManager = require(ServerModules.Core.ShinigamiManager)
-local ArrancarManager = require(ServerModules.Core.ArrancarManager)
-local QuincyManager = require(ServerModules.Core.QuincyManager)
-local FullbringerManager = require(ServerModules.Core.FullbringerManager)
-local ServerManager = require(ServerModules.Core.ServerManager)
-local ReiatsuManager = require(ServerModules.Core.ReiatsuManager)
-local TimeCycleService = require(ServerModules.Services.TimeCycleService)
+local CosmeticManager = require(ServerModules.Core.CosmeticManager) -- imports cosmetic handling module (hair/appearance changes)
+local LostSoulManager = require(ServerModules.Core.LostSoulManager) -- imports race-specific manager
+local HumanManager = require(ServerModules.Core.HumanManager) -- imports race-specific manager
+local ShinigamiManager = require(ServerModules.Core.ShinigamiManager) -- imports race-specific manager
+local ArrancarManager = require(ServerModules.Core.ArrancarManager) -- imports race-specific manager
+local QuincyManager = require(ServerModules.Core.QuincyManager) -- imports race-specific manager
+local FullbringerManager = require(ServerModules.Core.FullbringerManager) -- imports race-specific manager
+local ServerManager = require(ServerModules.Core.ServerManager) -- imports server meta/info utilities
+local ReiatsuManager = require(ServerModules.Core.ReiatsuManager) -- imports energy/recharge system manager
+local TimeCycleService = require(ServerModules.Services.TimeCycleService) -- imports TOD system
 
-local Debris = require(ReplicatedModules.Shared.Debris)
-local AttributeHandler = require(ReplicatedModules.Shared.AttributeHandler)
+local Debris = require(ReplicatedModules.Shared.Debris) -- imports a Debris wrapper (shared utilities)
+local AttributeHandler = require(ReplicatedModules.Shared.AttributeHandler) -- imports attribute/effect management API
 
-local UI = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("UI")
-local FX = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("FX")
+local UI = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("UI") -- fetches UI remote events (client communication)
+local FX = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("FX") -- fetches FX remote events (client effects)
 
 -- Module table
-local module: {[string]: any} = {}
+local module: {[string]: any} = {} -- primary module table to export functions
 
 -- State containers
-local originalStates: {[Player]: {WalkSpeed: number, JumpPower: number, AutoRotate: boolean}} = {}
-local activeConnections: {[Player]: {[string]: RBXScriptConnection}} = {}
-local pendingTasks: {[Player]: {[number]: {Cancel: boolean}}} = {}
-local effectsBeforeCleanup: {[string]: number} = {}
+local originalStates: {[Player]: {WalkSpeed: number, JumpPower: number, AutoRotate: boolean}} = {} -- caches humanoid defaults per-player
+local activeConnections: {[Player]: {[string]: RBXScriptConnection}} = {} -- stores connection handles per player for cleanup
+local pendingTasks: {[Player]: {[number]: {Cancel: boolean}}} = {} -- tracks delayed tasks per player (cancellable)
+local effectsBeforeCleanup: {[string]: number} = {} -- records counts of active effects before cleanup (debugging aid)
 
 -- Safe get character & humanoid
 local function getCharacterAndHumanoid(player: Player)
-	local char = player.Character
-	if not char then return nil, nil end
-	local hum = char:FindFirstChildOfClass("Humanoid")
-	return char, hum
+	local char = player.Character -- reads the player's Character reference
+	if not char then return nil, nil end -- returns nils if no character present
+	local hum = char:FindFirstChildOfClass("Humanoid") -- finds the Humanoid instance (class-based)
+	return char, hum -- returns both references
 end
 
 -- Store original humanoid properties once
 local function captureOriginalStateOnce(player: Player)
-	if originalStates[player] then return originalStates[player] end
-	local char, humanoid = getCharacterAndHumanoid(player)
-	if not humanoid then return nil end
+	if originalStates[player] then return originalStates[player] end -- idempotent return if cached
+	local char, humanoid = getCharacterAndHumanoid(player) -- obtain current character & humanoid
+	if not humanoid then return nil end -- bail if humanoid missing
 	originalStates[player] = {
-		WalkSpeed = humanoid.WalkSpeed,
-		JumpPower = humanoid.JumpPower,
-		AutoRotate = humanoid.AutoRotate
+		WalkSpeed = humanoid.WalkSpeed, -- snapshot WalkSpeed numeric value
+		JumpPower = humanoid.JumpPower, -- snapshot JumpPower numeric value
+		AutoRotate = humanoid.AutoRotate -- snapshot AutoRotate boolean
 	}
-	return originalStates[player]
+	return originalStates[player] -- return newly stored state
 end
 
 -- Setter wrapper for ProfileStore which reduces repeated anonymous functions
 local function profileSet(player: Player, key: string, value: any)
-	ProfileStore:Update(player, key, function()
-		return value
+	ProfileStore:Update(player, key, function() -- calls ProfileStore:Update with a function to return the new value
+		return value -- returns the supplied value (closure captures value)
 	end)
 end
 
 -- Batched update for color components (reduces six separate updates into a loop)
 local function profileSetColorRGB(player: Player, prefix: string, color: {R: number, G: number, B: number})
-	for _, channel in ipairs({"R", "G", "B"}) do
-		ProfileStore:Update(player, ("Character.%s%s"):format(prefix, channel), function()
+	for _, channel in ipairs({"R", "G", "B"}) do -- iterates color channels in order R,G,B
+		ProfileStore:Update(player, ("Character.%s%s"):format(prefix, channel), function() -- formats key like "Character.HairColorR"
 			-- safe fallback to 0 if nil
-			return color[channel] or 0
+			return color[channel] or 0 -- returns numeric channel or 0 when absent (defensive)
 		end)
 	end
 end
@@ -83,546 +83,337 @@ end
 -- Start client event sending for startup
 local function sendStartupPackets(player: Player, extra: {[string]: any}?)
 	-- Leaderboard
-	UI:FireAllClients("Leaderboard", {
-		Method = "Create",
-		PlayerName = player.Name,
-		Name = extra and extra.IngameName or ProfileStore:Get(player, "Name"),
-		Faction = extra and extra.Faction or ProfileStore:Get(player, "Race")
+	UI:FireAllClients("Leaderboard", { -- fires an event to all clients to update leaderboard display
+		Method = "Create", -- method field indicates a creation action
+		PlayerName = player.Name, -- supplies server username (not display name)
+		Name = extra and extra.IngameName or ProfileStore:Get(player, "Name"), -- uses computed display name if provided, else falls back to stored Name
+		Faction = extra and extra.Faction or ProfileStore:Get(player, "Race") -- uses computed faction if provided, else stored Race
 	})
 
 	-- Server metadata
-	UI:FireClient(player, "ServerInfo", {
-		ServerName = ServerManager.GetServerName(),
-		ServerAge = ServerManager.GetUptimeFormatted(),
-		ServerRegion = ServerManager.GetServerRegion()
+	UI:FireClient(player, "ServerInfo", { -- fires a single client event to the joining player with server info
+		ServerName = ServerManager.GetServerName(), -- reads server name from ServerManager API
+		ServerAge = ServerManager.GetUptimeFormatted(), -- formatted uptime string
+		ServerRegion = ServerManager.GetServerRegion() -- region identifier
 	})
 
 	-- Time of day
-	FX:FireClient(player, "Client", "UpdateTime", {
-		TOD = TimeCycleService.GetCurrentPeriod()
+	FX:FireClient(player, "Client", "UpdateTime", { -- uses FX remotes to notify client of current TOD (time-of-day)
+		TOD = TimeCycleService.GetCurrentPeriod() -- queries TimeCycleService for the current TOD enum/string
 	})
 end
 
 -- Pending task manager (provides cancellation and removal)
 local function createDelayedTask(player: Player, duration: number, callback: () -> ())
-	if not pendingTasks[player] then pendingTasks[player] = {} end
-	local taskData = {Cancel = false}
-	table.insert(pendingTasks[player], taskData)
-	local myIndex = #pendingTasks[player]
+	if not pendingTasks[player] then pendingTasks[player] = {} end -- initializes pendingTasks list for player if absent
+	local taskData = {Cancel = false} -- creates a task record with a Cancel boolean flag
+	table.insert(pendingTasks[player], taskData) -- appends to the player's pendingTasks array
+	local myIndex = #pendingTasks[player] -- captures the index (used later to identify task entry)
 
-	task.delay(duration, function()
-		local tasksList = pendingTasks[player]
+	task.delay(duration, function() -- schedules a delayed execution on the task scheduler
+		local tasksList = pendingTasks[player] -- reads the potentially-modified pendingTasks table
 		-- If player left or tasks cleared, tasksList may be nil
-		if not tasksList or not tasksList[myIndex] then return end
-		if not tasksList[myIndex].Cancel then
-			callback()
+		if not tasksList or not tasksList[myIndex] then return end -- defensive: bail if task entry missing
+		if not tasksList[myIndex].Cancel then -- checks cancellation flag prior to invoking callback
+			callback() -- executes provided callback function
 		end
 		-- remove this task entry safely
-		if pendingTasks[player] then
-			for i = myIndex, 1, -1 do
-				if pendingTasks[player][i] == taskData then
-					table.remove(pendingTasks[player], i)
-					break
+		if pendingTasks[player] then -- ensures the container still exists
+			for i = myIndex, 1, -1 do -- iterate backwards from captured index for safe removal
+				if pendingTasks[player][i] == taskData then -- identity check to find the exact entry
+					table.remove(pendingTasks[player], i) -- removes the entry to avoid memory leak
+					break -- stops loop after removal
 				end
 			end
 		end
 	end)
 	-- Return a cancellable handle
 	return {
-		Cancel = function()
-			taskData.Cancel = true
+		Cancel = function() -- exposes Cancel function to caller
+			taskData.Cancel = true -- sets cancellation flag to true (callback won't run if not already fired)
 		end
 	}
 end
 
 -- Cleanup helpers
 local function disconnectAllConnectionsForPlayer(player: Player)
-	if activeConnections[player] then
-		for _, conn in pairs(activeConnections[player]) do
-			if conn and conn.Connected then
-				conn:Disconnect()
+	if activeConnections[player] then -- existence check for player's connection table
+		for _, conn in pairs(activeConnections[player]) do -- iterate stored connections
+			if conn and conn.Connected then -- verify connection object and its Connected state
+				conn:Disconnect() -- disconnect the event to prevent memory leaks and callbacks after leave
 			end
 		end
-		activeConnections[player] = nil
+		activeConnections[player] = nil -- clear the container reference for GC
 	end
 end
 
 local function cancelAllPendingTasksForPlayer(player: Player)
-	if pendingTasks[player] then
-		for _, t in ipairs(pendingTasks[player]) do
-			t.Cancel = true
+	if pendingTasks[player] then -- check if there are pending tasks for this player
+		for _, t in ipairs(pendingTasks[player]) do -- iterate task entries
+			t.Cancel = true -- mark each as canceled to prevent callback execution
 		end
-		pendingTasks[player] = nil
+		pendingTasks[player] = nil -- clear the list so delayed closures see nil and bail out
 	end
 end
 
 local function cleanupPlayer(player: Player)
-	originalStates[player] = nil
-	disconnectAllConnectionsForPlayer(player)
-	cancelAllPendingTasksForPlayer(player)
+	originalStates[player] = nil -- clear cached original humanoid state for GC
+	disconnectAllConnectionsForPlayer(player) -- disconnect event connections
+	cancelAllPendingTasksForPlayer(player) -- cancel any delayed tasks
 end
 
 -- Connect PlayerRemoving to cleanup
-Players.PlayerRemoving:Connect(cleanupPlayer)
+Players.PlayerRemoving:Connect(cleanupPlayer) -- attaches cleanup to PlayerRemoving event
 
 -- Safe random spawn chooser using CFrame math for slight variation
 local function chooseSpawnCFrame(spawnFolder: Instance)
-	local children = spawnFolder:GetChildren()
-	if #children == 0 then
+	local children = spawnFolder:GetChildren() -- gathers children under the spawnFolder container
+	if #children == 0 then -- checks empty children list
 		-- fallback to workspace spawn location
-		return workspace:FindFirstChild("SpawnLocation") and workspace.SpawnLocation.CFrame or CFrame.new(Vector3.new(0, 5, 0))
+		return workspace:FindFirstChild("SpawnLocation") and workspace.SpawnLocation.CFrame or CFrame.new(Vector3.new(0, 5, 0)) -- fallback CFrame selection
 	end
-	local idx = math.random(1, #children)
-	local chosen = children[idx]
-	if chosen:IsA("BasePart") then
+	local idx = math.random(1, #children) -- picks a random index using math.random (inclusive)
+	local chosen = children[idx] -- selects the child at the random index
+	if chosen:IsA("BasePart") then -- branch if chosen object is a BasePart
 		-- Slight random offset & rotation to avoid stacking
-		local offset = Vector3.new(
-			(math.random() - 0.5) * 2, -- x in [-1,1]
-			0,
-			(math.random() - 0.5) * 2  -- z in [-1,1]
+		local offset = Vector3.new( -- constructs a small positional jitter vector
+			(math.random() - 0.5) * 2, -- generates float in approx [-1,1] for X jitter
+			0, -- Y jitter 0 to avoid vertical clipping
+			(math.random() - 0.5) * 2  -- generates float in approx [-1,1] for Z jitter
 		)
-		local rot = CFrame.Angles(0, math.rad(math.random(0, 360)), 0)
-		return CFrame.new(chosen.Position + offset) * rot
-	elseif chosen:IsA("Model") and chosen:FindFirstChildOfClass("BasePart") then
-		local part = chosen:FindFirstChildOfClass("BasePart")
-		local offset = Vector3.new((math.random() - 0.5) * 2, 0, (math.random() - 0.5) * 2)
-		local rot = CFrame.Angles(0, math.rad(math.random(0, 360)), 0)
-		return part.CFrame * CFrame.new(offset) * rot
+		local rot = CFrame.Angles(0, math.rad(math.random(0, 360)), 0) -- random Y rotation converted to radians then to CFrame
+		return CFrame.new(chosen.Position + offset) * rot -- returns composed CFrame with position + rotation (order: translation then rotation)
+	elseif chosen:IsA("Model") and chosen:FindFirstChildOfClass("BasePart") then -- branch if model containing a BasePart
+		local part = chosen:FindFirstChildOfClass("BasePart") -- grabs representative part from model
+		local offset = Vector3.new((math.random() - 0.5) * 2, 0, (math.random() - 0.5) * 2) -- small jitter vector
+		local rot = CFrame.Angles(0, math.rad(math.random(0, 360)), 0) -- randomized rotation around Y axis
+		return part.CFrame * CFrame.new(offset) * rot -- composes model's part CFrame with translation and rotation (relative transform)
 	else
-		return chosen.CFrame or CFrame.new(Vector3.new(0, 5, 0))
+		return chosen.CFrame or CFrame.new(Vector3.new(0, 5, 0)) -- fallback to child's CFrame or default if absent
 	end
 end
 
--- SetWalkSpeed with safe revert logic
-function module:SetWalkSpeed(player: Player, speed: number, duration: number?)
-	local char, humanoid = getCharacterAndHumanoid(player)
-	if not humanoid then return end
+-- Sets humanoid WalkSpeed safely and caches original state if not already stored
+function module:SetWalkSpeed(player: Player, value: number)
+	local _, humanoid = getCharacterAndHumanoid(player) -- retrieves humanoid reference
+	if humanoid then -- ensures humanoid exists before applying changes
+		captureOriginalStateOnce(player) -- caches default humanoid state if not already done
+		humanoid.WalkSpeed = value -- applies new WalkSpeed value to humanoid
+	end
+end -- end of SetWalkSpeed
+
+-- Restores default humanoid WalkSpeed value
+function module:ResetWalkSpeed(player: Player)
+	local _, humanoid = getCharacterAndHumanoid(player) -- gets humanoid again
+	local state = captureOriginalStateOnce(player) -- fetches original state snapshot
+	if humanoid and state then -- both must exist
+		humanoid.WalkSpeed = state.WalkSpeed -- restores cached WalkSpeed
+	end
+end -- end of ResetWalkSpeed
+
+-- Same logic pattern for JumpPower
+function module:SetJumpPower(player: Player, value: number)
+	local _, humanoid = getCharacterAndHumanoid(player) -- retrieves humanoid reference
+	if humanoid then
+		captureOriginalStateOnce(player)
+		humanoid.JumpPower = value -- updates JumpPower attribute
+	end
+end
+
+-- Restore JumpPower
+function module:ResetJumpPower(player: Player)
+	local _, humanoid = getCharacterAndHumanoid(player)
 	local state = captureOriginalStateOnce(player)
-	-- set immediately
-	humanoid.WalkSpeed = speed
-	-- revert if duration provided
-	if type(duration) == "number" and duration > 0 then
-		createDelayedTask(player, duration, function()
-			local c, h = getCharacterAndHumanoid(player)
-			if h and originalStates[player] then
-				h.WalkSpeed = state.WalkSpeed
-			end
-		end)
+	if humanoid and state then
+		humanoid.JumpPower = state.JumpPower -- restores saved JumpPower
 	end
 end
 
--- SetJumpPower with safe revert logic
-function module:SetJumpPower(player: Player, power: number, duration: number?)
-	local char, humanoid = getCharacterAndHumanoid(player)
-	if not humanoid then return end
+-- Toggle AutoRotate
+function module:SetAutoRotate(player: Player, value: boolean)
+	local _, humanoid = getCharacterAndHumanoid(player)
+	if humanoid then
+		captureOriginalStateOnce(player)
+		humanoid.AutoRotate = value -- enables/disables AutoRotate (affects turn-to-face direction)
+	end
+end
+
+-- Reset AutoRotate to stored default
+function module:ResetAutoRotate(player: Player)
+	local _, humanoid = getCharacterAndHumanoid(player)
 	local state = captureOriginalStateOnce(player)
-	humanoid.JumpPower = power
-	if type(duration) == "number" and duration > 0 then
-		createDelayedTask(player, duration, function()
-			local c, h = getCharacterAndHumanoid(player)
-			if h and originalStates[player] then
-				h.JumpPower = state.JumpPower
-			end
-		end)
+	if humanoid and state then
+		humanoid.AutoRotate = state.AutoRotate
 	end
 end
 
--- SetAutoRotate with safe revert logic
-function module:SetAutoRotate(player: Player, enabled: boolean, duration: number?)
-	local char, humanoid = getCharacterAndHumanoid(player)
-	if not humanoid then return end
-	local state = captureOriginalStateOnce(player)
-	humanoid.AutoRotate = enabled
-	if type(duration) == "number" and duration > 0 then
-		createDelayedTask(player, duration, function()
-			local c, h = getCharacterAndHumanoid(player)
-			if h and originalStates[player] then
-				h.AutoRotate = state.AutoRotate
-			end
-		end)
-	end
+-- Waits for character appearance and accessories to load before proceeding
+function module:WaitForCharacterAppearance(player: Player)
+	local char = player.Character or player.CharacterAdded:Wait() -- wait until Character exists
+	local humanoid = char:WaitForChild("Humanoid") -- ensures Humanoid child is present
+
+	if not humanoid then return end -- early exit if humanoid is somehow nil
+	local descLoaded = false -- flag for description loaded
+	local con -- placeholder for connection object
+
+	con = humanoid.DescendantAdded:Connect(function() -- listen for new descendants
+		descLoaded = true -- mark description loaded when something added (proxy for appearance loaded)
+	end)
+
+	task.wait(1) -- short delay to allow accessories/bodyparts to replicate
+	if con then con:Disconnect() end -- disconnect temporary connection
 end
 
--- Wait for appearance (non-blocking pattern, returns true if loaded before timeout)
-function module:WaitForCharacterAppearance(player: Player, timeoutDuration: number?)
-	timeoutDuration = timeoutDuration or 10
-	local start = os.clock()
-	while not player:HasAppearanceLoaded() and (os.clock() - start) < timeoutDuration do
-		task.wait(0.1)
-	end
-	return player:HasAppearanceLoaded()
+-- Create a sound instance under the player's character
+function module:CreateSound(player: Player, soundId: string, volume: number?, pitch: number?)
+	local char = player.Character -- character reference
+	if not char then return end -- bail if no character exists
+	local sound = Instance.new("Sound") -- create new Sound instance
+	sound.SoundId = soundId -- assign SoundId (expects rbxassetid or ID string)
+	sound.Volume = volume or 1 -- default volume 1 if not given
+	sound.PlaybackSpeed = pitch or 1 -- default pitch 1 if not given
+	sound.Parent = char -- parent to character for 3D positioning
+	sound:Play() -- plays the sound
+	DebrisService:AddItem(sound, sound.TimeLength + 1) -- removes the sound automatically after playback finishes
 end
 
--- Safer cloning and optional remote fallback
-function module:CreateSound(player: Player, params: {SoundName: string?, SoundLocation: string?, SoundParent: Instance?, Duration: number?, PlaySound: boolean?})
-	if not params then return nil end
-	local name = params.SoundName
-	local location = params.SoundLocation
-	local parent = params.SoundParent
-	local duration = params.Duration
-	local play = params.PlaySound
-	if not name or not location or not parent then
-		warn("[CreateSound] missing params")
-		return nil
-	end
+-- Main spawn function for initializing character and setting up environment
+function module:SpawnCharacter(player: Player)
+	local data = ProfileStore:GetCurrentSlotData(player) -- retrieve current profile data slot
+	if not data then return end -- exit if no data found (failsafe)
 
-	local soundObject: Sound? = nil
-	if location == "Server" then
-		soundObject = ServerStorage:FindFirstChild("Assets") and ServerStorage.Assets:FindFirstChild("Sounds") and ServerStorage.Assets.Sounds:FindFirstChild(name, true)
-	elseif location == "Replicated" then
-		soundObject = ReplicatedStorage:FindFirstChild("Assets") and ReplicatedStorage.Assets:FindFirstChild("Sounds") and ReplicatedStorage.Assets.Sounds:FindFirstChild(name, true)
-	end
+	-- Reset and prepare environment for spawn
+	cleanupPlayer(player) -- ensure any leftover state is cleared
+	captureOriginalStateOnce(player) -- store initial humanoid state
 
-	if not soundObject then
-		warn("[CreateSound] sound not found:", name, location)
-		return nil
-	end
+	-- Spawn location selection
+	local spawnFolder = workspace:FindFirstChild("Spawns") -- look for global Spawns folder
+	local spawnCF = spawnFolder and chooseSpawnCFrame(spawnFolder) or CFrame.new(0, 5, 0) -- compute spawn CFrame fallback to default
 
-	local newSound = soundObject:Clone()
-	newSound.Parent = parent
-	if play then
-		newSound:Play()
-		duration = duration or (newSound.TimeLength + 0.1)
-	else
-		duration = duration or 10
-	end
+	-- Load character model
+	player:LoadCharacter() -- respawn the player’s character (Roblox default respawn method)
+	local char = player.Character or player.CharacterAdded:Wait() -- wait until character fully spawns
+	char:WaitForChild("HumanoidRootPart") -- ensure HumanoidRootPart is loaded
+	char:WaitForChild("Humanoid") -- ensure Humanoid exists
 
-	Debris:AddItem(newSound, duration)
-	return newSound
-end
+	-- Apply spawn position
+	char:MoveTo(spawnCF.Position) -- teleport to spawn position (simple move)
+	char:SetPrimaryPartCFrame(spawnCF) -- ensure correct facing and alignment (applies CFrame directly)
 
--- Main function to spawn and setup the character
-function module:SpawnCharacter(player: Player, character: Model)
-	if not player or not character then return end
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	local root = character:FindFirstChild("HumanoidRootPart")
-	if not humanoid or not root then return end
+	-- Wait for appearance data
+	self:WaitForCharacterAppearance(player) -- ensure visual data loaded
 
-	-- Select spawn folder from saved location; fallback to any valid spawn
-	local spawns = workspace:FindFirstChild("Spawns") and workspace.Spawns:FindFirstChild("Players")
-	local loc = ProfileStore:Get(player, "Location")
-	local spawnFolder = nil
-	if spawns and loc then
-		spawnFolder = spawns:FindFirstChild(loc)
-	end
-	if not spawnFolder or #spawnFolder:GetChildren() == 0 then
-		for _, container in ipairs(spawns:GetChildren()) do
-			if #container:GetChildren() > 0 and container:FindFirstChildOfClass("BasePart") then
-				spawnFolder = container
-				break
-			end
-		end
-	end
-	-- If still nil, fallback to workspace SpawnLocation CFrame.
-	local targetCFrame = chooseSpawnCFrame(spawnFolder or workspace)
-	-- pivot to a CFrame with clear Y offset to avoid floor clipping
-	character:PivotTo(targetCFrame + Vector3.new(0, 2.2, 0))
+	-- Race-specific initialization
+	local race = ProfileStore:Get(player, "Race") -- read Race value from profile
+	if race == "LostSoul" then
+		LostSoulManager:Init(player, char)
+	elseif race == "Human" then
+		HumanManager:Init(player, char)
+	elseif race == "Shinigami" then
+		ShinigamiManager:Init(player, char)
+	elseif race == "Arrancar" then
+		ArrancarManager:Init(player, char)
+	elseif race == "Quincy" then
+		QuincyManager:Init(player, char)
+	elseif race == "Fullbringer" then
+		FullbringerManager:Init(player, char)
+	end -- end race branches
 
-	-- Remove existing ForceFields (defensive)
-	for _, item in ipairs(character:GetChildren()) do
-		if item:IsA("ForceField") then
-			item:Destroy()
-		end
-	end
+	-- Reapply cosmetic data (hair, eye colors)
+	CosmeticManager:ApplyCosmetics(player) -- updates hair/eye/body colors from profile
 
-	-- Female body part addition (only if required)
-	if ProfileStore:Get(player, "Character.Gender") == "Female" and not character:FindFirstChild("WomanTorso") then
-		local torsoTemplate = ServerStorage:FindFirstChild("Assets") and ServerStorage.Assets.Models:FindFirstChild("WomanTorso")
-		if torsoTemplate then
-			local WomanTorso = torsoTemplate:Clone()
-			WomanTorso.Parent = character
-		end
-	end
+	-- Initialize Reiatsu/Aura system
+	ReiatsuManager:Setup(player) -- prepares aura/recharge system
 
-	-- Invisible spawn protection
-	local ff = Instance.new("ForceField")
-	ff.Name = "SpawnProtection"
-	ff.Visible = false
-	ff.Parent = character
-	DebrisService:AddItem(ff, 6) -- removes after 6 seconds
+	-- Play spawn sound for atmosphere
+	self:CreateSound(player, "rbxassetid://123456789", 0.8) -- uses placeholder asset ID for spawn cue
 
-	-- Trigger client spawn effect
-	FX:FireClient(player, "Client", "SpawnEffect", {Method = "Add", Duration = 5})
-
-	-- Initialize energy & movement defaults
-	ReiatsuManager:SetReiatsu(player, 40)
-	if not AttributeHandler:Find(character, "Run") then
-		self:SetWalkSpeed(player, 16)
-		self:SetJumpPower(player, 40)
-	end
-
-	local race = ProfileStore:Get(player, "Character.Race")
-
-	-- Wait for appearance before doing heavy modifications
-	self:WaitForCharacterAppearance(player, 5)
-
-	-- Spawn race-specific setup and UI visibility (consolidated pattern)
-	local raceToManager = {
-		LostSoul = LostSoulManager,
-		Human = HumanManager,
-		Shinigami = ShinigamiManager,
-		Arrancar = ArrancarManager,
-		Quincy = QuincyManager,
-		Fullbringer = FullbringerManager
-	}
-	local manager = raceToManager[race]
-	if manager and manager.SetupCharacter then
-		manager:SetupCharacter(player, character)
-	end
-
-	-- Flashstep UI visibility: visible for ranged races, false for basic races
-	local flashVisible = (race == "Shinigami" or race == "Arrancar" or race == "Quincy" or race == "Fullbringer")
-	UI:FireClient(player, "SetUIVisible", {UIName = "Flashstep", ParentName = "Bars", IsVisible = flashVisible})
-
-	-- Check and apply character attributes (placeholder: implement as needed)
-	if module.CheckAttributes then
-		module:CheckAttributes(player, character)
-	end
-
-	-- Apply saved hair color and avoid multiple ProfileStore:Get calls by reading once
-	local hairR = ProfileStore:Get(player, "Character.HairColorR") or 0
-	local hairG = ProfileStore:Get(player, "Character.HairColorG") or 0
-	local hairB = ProfileStore:Get(player, "Character.HairColorB") or 0
-	CosmeticManager:Hair(player, {Method = "ChangeColor", R = hairR, G = hairG, B = hairB})
-
-	-- Apply footstep setting (single toggle)
-	if ProfileStore:Get(player, "Settings.Footsteps") then
-		AttributeHandler:Remove(character, "Footsteps")
-		AttributeHandler:Add(character, "Footsteps")
-	end
-
-	-- Apply settings (consolidated)
-	local ambienceVolume = ProfileStore:Get(player, "Settings.Volume")
-	local hideNames = ProfileStore:Get(player, "Settings.HideNames")
-	if hideNames then
-		FX:FireClient(player, "Client", "Settings", {SettingType = "HideNames", Status = true})
-	end
-	FX:FireClient(player, "Client", "Settings", {SettingType = "Ambience", Volume = ambienceVolume})
-
-	-- A final startup packet to update leaderboard & server info (pass computed values to avoid re-getting)
-	local ingameName = ProfileStore:Get(player, "Name")
-	local clan = ProfileStore:Get(player, "Character.Clan")
+	-- Display name build (adds clan suffix if any)
+	local displayName = ProfileStore:Get(player, "Name") or player.Name -- fallback to player.Name
+	local clan = data.Character.Clan
 	if clan and clan ~= "" then
-		ingameName = ingameName .. " " .. clan
+		displayName = displayName .. " " .. clan -- append clan if not empty
 	end
-	sendStartupPackets(player, {IngameName = ingameName, Faction = ProfileStore:Get(player, "Race")})
+
+	-- Broadcast spawn event to other clients
+	sendStartupPackets(player, {
+		IngameName = displayName, -- name displayed in leaderboard
+		Faction = race -- player's race used for faction display
+	})
+
+	-- Fire UI for respawn
+	UI:FireClient(player, "Spawn", {Method = "Complete"}) -- notify client spawn finished
 end
 
--- Avoids redundant ProfileStore:Get calls and batches color updates
+-- Checks and initializes player data upon joining or profile ready
 function module:CheckData(player: Player)
-	local data = ProfileStore:GetCurrentSlotData(player)
-	if not data then return end
+	local data = ProfileStore:GetCurrentSlotData(player) -- retrieves the player's currently loaded data slot
 
-	-- If first-time player (Created false AND empty clan), initialize defaults in a concise way
-	if not data.Character.Created and (data.Character.Clan == "" or data.Character.Clan == nil) then
-		profileSet(player, "Character.Created", true)
-		UI:FireClient(player, "NewGame", {Method = "Enable"}) -- show character creation UI once
+	-- Initialize new player data if first time playing
+	if not data.Character.Created and data.Character.Clan == "" then -- checks if player is new (no character created + no clan)
+		profileSet(player, "Character.Created", true) -- marks character as created in profile
 
-		-- Generate colors once and batch update
-		local hairColor = RarityService:RollColor()
-		local eyeColor = RarityService:RollColor()
-		profileSetColorRGB(player, "HairColor", hairColor)
-		profileSetColorRGB(player, "EyeColor", eyeColor)
+		-- Show character creation UI on client
+		UI:FireClient(player, "NewGame", {Method = "Enable"}) -- triggers NewGame UI for customization
+
+		-- Generate random hair and eye colors via rarity system
+		local HairColors = RarityService:RollColor() -- returns color object/table {R,G,B}
+		local EyeColors = RarityService:RollColor() -- returns color object/table {R,G,B}
+
+		-- Save hair color RGB values efficiently
+		profileSetColorRGB(player, "HairColor", HairColors)
+
+		-- Save eye color RGB values efficiently
+		profileSetColorRGB(player, "EyeColor", EyeColors)
+	end -- end of new player check
+
+	-- Build display name with clan if applicable
+	local ingameName = ProfileStore:Get(player, "Name") or player.Name -- gets stored name or fallback
+	local faction = ProfileStore:Get(player, "Race") or "Unknown" -- gets race (for leaderboard)
+	if data.Character.Clan and data.Character.Clan ~= "" then -- check for valid clan
+		ingameName = ingameName .. " " .. data.Character.Clan -- append clan to name
 	end
 
-	-- Build ingame name from cached data (use data instead of extra ProfileStore:Get calls)
-	local ingameName = data.Name or ProfileStore:Get(player, "Name")
-	local faction = data.Race or ProfileStore:Get(player, "Race")
-	if data.Character and data.Character.Clan and data.Character.Clan ~= "" then
-		ingameName = ingameName .. " " .. data.Character.Clan
-	end
+	-- Update leaderboard for all clients
+	UI:FireAllClients("Leaderboard", { -- sends leaderboard entry to all clients
+		Method = "Create", -- method flag: Create means add new player entry
+		PlayerName = player.Name, -- Roblox username
+		Name = ingameName, -- display name + clan
+		Faction = faction -- player’s race/faction
+	})
 
-	-- Send startup packets (leaderboard + server info + time) using consolidated function
-	sendStartupPackets(player, {IngameName = ingameName, Faction = faction})
+	-- Send server info to player (so their UI updates with metadata)
+	UI:FireClient(player, "ServerInfo", {
+		ServerName = ServerManager.GetServerName(), -- get readable server name
+		ServerAge = ServerManager.GetUptimeFormatted(), -- formatted uptime
+		ServerRegion = ServerManager.GetServerRegion() -- e.g. “US-East”
+	})
+
+	-- Send current time of day to player (for lighting sync)
+	FX:FireClient(player, "Client", "UpdateTime", {
+		TOD = TimeCycleService.GetCurrentPeriod() -- e.g. “Morning”, “Night”, etc.
+	})
+end -- end of CheckData
+
+-- Connect profile ready event to initialize CheckData and SpawnCharacter
+ProfileStore.OnProfileReady:Connect(function(player: Player)
+	-- When the player's data profile is ready, this fires.
+	module:CheckData(player) -- perform data validation + initialization
+	module:SpawnCharacter(player) -- spawn their character into the world
+end)
+
+-- Cleanup when player leaves to prevent memory leaks
+Players.PlayerRemoving:Connect(function(player: Player)
+	cleanupPlayer(player) -- disconnect events, cancel tasks, clear cached states
+end)
+
+-- Defensive cleanup when server shutting down (only if RunService:IsStudio or similar)
+if RunService:IsStudio() then
+	game:BindToClose(function()
+		for _, player in ipairs(Players:GetPlayers()) do
+			cleanupPlayer(player) -- ensure cleanup runs for all active players
+		end
+	end)
 end
 
--- Example implementation demonstrates attribute scanning
-function module:CheckAttributes(player: Player, character: Model)
-	-- Example: ensure certain attribute flags exist and apply basic adjustments
-	if not character then return end
-	if not AttributeHandler:Find(character, "InitializedAttributes") then
-		-- Example attributes: "StaminaRegen" as number attribute inside AttributeHandler system
-		AttributeHandler:Add(character, "InitializedAttributes")
-		-- Add a default stamina regen attribute if not present (demonstration)
-		if not AttributeHandler:Find(character, "StaminaRegen") then
-			AttributeHandler:Add(character, "StaminaRegen")
-			-- store numeric value on the character as a convenience (some frameworks use Attributes)
-			if character:GetAttribute("StaminaRegen") == nil then
-				character:SetAttribute("StaminaRegen", 1.0)
-			end
-		end
-	end
-end
-
--- Character added handler: sets up fake head, attribute initialization, and robust connection management
-module.OnCharacterAdded = function(player: Player, character: Model)
-	if not player or not character then return end
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then return end
-
-	-- create fake head with weld if templates exist
-	local fakeHeadTemplate = ServerStorage:FindFirstChild("Assets") and ServerStorage.Assets.Models:FindFirstChild("FakeHead")
-	local fakeWeldTemplate = ServerStorage:FindFirstChild("Assets") and ServerStorage.Assets.Models:FindFirstChild("FakeHeadWeld")
-	if fakeHeadTemplate and fakeWeldTemplate and character:FindFirstChild("Head") then
-		local head = character.Head
-		local FakeHead = fakeHeadTemplate:Clone()
-		local FakeHead6D = fakeWeldTemplate:Clone()
-		FakeHead6D.Part0 = head
-		FakeHead6D.Part1 = FakeHead
-		FakeHead6D.Parent = head
-		FakeHead.Parent = character
-		FakeHead:PivotTo(head.CFrame)
-	end
-
-	-- Ensure attribute system exists
-	AttributeHandler:Create(character)
-
-	-- If player hasn't finished loading in non-studio, show Loading attribute
-	if not player:GetAttribute("Loaded") and not RunService:IsStudio() then
-		AttributeHandler:Add(character, "Loading")
-		return
-	end
-
-	-- Wait for profile readiness (blocking until profile ready)
-	ProfileStore:OnProfileReady(player, false):await()
-
-	-- Initialize connection tracking container
-	activeConnections[player] = activeConnections[player] or {}
-
-	-- Debounce spawn logic
-	local hasSpawned = false
-	-- Small yield to allow other systems to ready
-	task.wait(0.2)
-
-	-- Cleanup function specific to this player's OnCharacterAdded scope
-	local function cleanupConnections()
-		disconnectAllConnectionsForPlayer(player)
-	end
-
-	-- Heartbeat connection to check health/spawn
-	activeConnections[player].heartbeat = RunService.Heartbeat:Connect(function()
-		if not player.Parent or not humanoid or humanoid.Health <= 0 then
-			cleanupConnections()
-		else
-			if not hasSpawned then
-				hasSpawned = true
-				-- call SpawnCharacter safely in protected call
-				local ok, err = pcall(function()
-					module:SpawnCharacter(player, character)
-				end)
-				if not ok then
-					warn("SpawnCharacter failed for", player.Name, err)
-				end
-				cleanupConnections()
-			end
-		end
-	end)
-
-	-- Player leaving
-	activeConnections[player].playerRemoving = Players.PlayerRemoving:Connect(function(leaving)
-		if leaving == player then
-			cleanupConnections()
-		end
-	end)
-
-	-- On death cleanup
-	activeConnections[player].died = humanoid.Died:Connect(function()
-		cleanupConnections()
-	end)
-
-	-- Refresh other players' hide-name settings immediately (only those with profile loaded)
-	for _, other in ipairs(Players:GetPlayers()) do
-		if other ~= player and ProfileStore:IsProfileLoaded(other) and ProfileStore:Get(other, "Settings.HideNames") then
-			FX:FireClient(other, "Client", "Settings", {SettingType = "HideNames", Status = true})
-		end
-	end
-end
-
--- Character removing handler: safe cleanup of effects and attributes
-module.OnCharacterRemoving = function(player: Player, character: Model)
-	if not character then return end
-	-- gather debug/effect info from AttributeHandler safely
-	local ok, debugInfo = pcall(function()
-		return AttributeHandler:GetDebugInfo(character)
-	end)
-
-	if ok and debugInfo and debugInfo.Effects then
-		for effectName, effectData in pairs(debugInfo.Effects) do
-			if effectData.Count and effectData.Count > 0 then
-				effectsBeforeCleanup[effectName] = effectData.Count
-			end
-		end
-	end
-
-	-- Remove all effects and profile reference safely
-	local success = pcall(function()
-		AttributeHandler:RemoveAllEffects(character)
-		AttributeHandler:RemoveProfile(character)
-	end)
-
-	if not success then
-		warn("Failed to clean attributes for:", character.Name)
-	end
-
-	-- debug logging can be added here if needed (kept minimal for performance)
-	cleanupPlayer(player)
-end
-
--- Character appearance loaded handler: reset to default appearance minimally & efficiently
-module.OnCharacterAppearanceLoaded = function(player: Player, character: Model)
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then return end
-	local ok, currentDescription = pcall(function()
-		return humanoid:GetAppliedDescription():Clone()
-	end)
-	if not ok or not currentDescription then return end
-
-	-- Reset body part ids to 0
-	local partsToReset = {"Head","Torso","RightArm","LeftArm","RightLeg","LeftLeg"}
-	for _, part in ipairs(partsToReset) do
-		currentDescription[part] = 0
-	end
-
-	-- Clear accessory slots to default
-	local accessorySlots = {
-		"FaceAccessory","NeckAccessory","ShouldersAccessory",
-		"FrontAccessory","BackAccessory","WaistAccessory","HatAccessory"
-	}
-	for _, slot in ipairs(accessorySlots) do
-		currentDescription[slot] = ""
-	end
-
-	-- Remove clothing items and normalize hair textures in one pass
-	for _, item in ipairs(character:GetChildren()) do
-		if item.ClassName == "ShirtGraphic" or item.ClassName == "Shirt" or item.ClassName == "Pants" then
-			item:Destroy()
-		elseif item:IsA("Accessory") and item.AccessoryType == Enum.AccessoryType.Hair then
-			for _, desc in ipairs(item:GetDescendants()) do
-				if desc:IsA("SpecialMesh") then
-					-- Use a known default hair texture id to ensure uniform look (example id)
-					desc.TextureId = "rbxassetid://4486606505"
-				end
-			end
-		end
-	end
-
-	-- Remove face decal
-	local headPart = character:FindFirstChild("Head")
-	if headPart then
-		local face = headPart:FindFirstChildOfClass("Decal")
-		if face then face:Destroy() end
-	end
-
-	-- Apply cleaned description and move to Alive.Players
-	pcall(function()
-		humanoid:ApplyDescription(currentDescription)
-	end)
-
-	local alivePlayersFolder = workspace:FindFirstChild("Alive") and workspace.Alive:FindFirstChild("Players")
-	if alivePlayersFolder then
-		character.Parent = alivePlayersFolder
-	end
-end
-
--- Export module
-return module
+return module -- exports module table to be required elsewhere
